@@ -244,6 +244,22 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ... (Management Commands remain the same) ...
 
 # ====================================================================
+# HEALTH CHECK SERVER (FOR RENDER)
+# ====================================================================
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def start_health_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"Health check server listening on port {port}")
+    server.serve_forever()
+
+# ====================================================================
 # MAIN
 # ====================================================================
 
