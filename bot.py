@@ -430,6 +430,17 @@ def main():
     application.add_handler(CommandHandler("list", list_subs))
     application.add_handler(CommandHandler("delete", delete_sub))
 
+    # Debug Handler: Catch any text that wasn't handled by the conversation or commands
+    async def debug_catch_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        logger.info(f"UNHANDLED MESSAGE from {update.effective_user.id}: {update.message.text}")
+        await update.message.reply_text(
+            "⚠️ I received your message, but I wasn't expecting it.\n"
+            "If you were trying to use `/add`, the session might have timed out or reset.\n"
+            "Please try `/add` again."
+        )
+
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug_catch_all))
+
     # Global Job Scheduler
     # We run one global job that checks ALL subscriptions
     if application.job_queue:
