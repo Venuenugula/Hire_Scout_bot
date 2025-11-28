@@ -153,13 +153,72 @@ def scrape_and_filter(role, location, hours_old=24, limit=10):
         for _, row in jobs.iterrows():
             if pd.isna(row['title']) or pd.isna(row['job_url']):
                 continue
-            job_list.append(row)
+            
+            # AI Filtering
+            # We pass the job and the original role/location query to the AI
+            user_query = f"{role} in {location}"
+            if analyze_job_relevance(row, user_query):
+                job_list.append(row)
+            else:
+                logger.info(f"Skipping irrelevant job: {row.get('title')}")
             
         return job_list
 
     except Exception as e:
         logger.error(f"Error scraping jobs: {e}")
         return []
+
+# ====================================================================
+# AI FILTERING LAYER (Gemini)
+# ====================================================================
+import google.generativeai as genai
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    logger.warning("⚠️ GEMINI_API_KEY not found. AI filtering will be disabled.")
+
+def analyze_job_relevance(job, user_query):
+    """
+    Uses Gemini to check if a job matches the user's query.
+    Returns True (Relevant) or False (Not Relevant).
+    """
+    if not GEMINI_API_KEY:
+        return True # Fail open if no key
+
+    try:
+        title = job.get('title', 'N/A')
+        company = job.get('company_name', 'N/A')
+        description = job.get('description', 'No description available')
+        
+        # Truncate description to save tokens and avoid limits
+        description = description[:1000] 
+
+        prompt = (
+            f"You are a strict technical recruiter. "
+            f"User is looking for: '{user_query}'. "
+            f"Job Title: '{title}'. "
+            f"Company: '{company}'. "
+            f"Job Description Snippet: '{description}'. "
+            f"Is this job a good match for the user's query? "
+            f"Ignore 'Senior' or 'Lead' roles if the user didn't ask for them. "
+            f"Ignore unrelated technologies. "
+            f"Reply ONLY with 'YES' or 'NO'."
+        )
+
+        model = genai.GenerativeModel('gemini-pro')
+        response = model.generate_content(prompt)
+        
+        answer = response.text.strip().upper()
+        logger.info(f"AI Decision for '{title}': {answer}")
+        
+        return "YES" in answer
+
+    except Exception as e:
+        logger.error(f"AI Error: {e}")
+        return True # Fail open on error to not miss jobs
 
 # ====================================================================
 # TELEGRAM HANDLERS

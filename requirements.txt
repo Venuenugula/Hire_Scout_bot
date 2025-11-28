@@ -3,3 +3,4 @@ APScheduler
 pandas
 python-jobspy
 tls_client
+google-generativeai

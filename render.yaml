@@ -8,3 +8,5 @@ services:
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false

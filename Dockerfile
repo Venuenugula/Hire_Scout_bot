@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Define environment variable
 ENV TELEGRAM_BOT_TOKEN=""
+ENV GEMINI_API_KEY=""
 
 # Run bot.py when the container launches
 CMD ["python", "bot.py"]
