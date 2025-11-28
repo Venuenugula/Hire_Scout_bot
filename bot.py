@@ -1,6 +1,7 @@
 import os
 import logging
-import sqlite3
+import logging
+import psycopg2
 import asyncio
 import threading
 import pandas as pd
@@ -24,7 +25,8 @@ from telegram.ext import (
 # 🚨 REPLACE WITH YOUR ACTUAL TOKEN
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Use mounted disk path if available (for Render persistence), else local file
-DB_FILE = "/app/data/bot_database.db" if os.path.exists("/app/data") else "bot_database.db"
+# Database URL from Render environment
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Logging setup
 logging.basicConfig(
@@ -40,89 +42,114 @@ AWAITING_ROLE, AWAITING_LOCATION = range(2)
 # ====================================================================
 
 class Database:
-    def __init__(self, db_file):
-        self.db_file = db_file
+    def __init__(self, db_url):
+        self.db_url = db_url
         self.init_db()
 
     def get_connection(self):
-        return sqlite3.connect(self.db_file)
+        return psycopg2.connect(self.db_url)
 
     def init_db(self):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            # Table for user subscriptions (Updated for multiple subs)
-            # We drop the old table if it exists to migrate to the new schema
-            # In a production app with real users, we would migrate data, but here we reset.
-            try:
-                cursor.execute("SELECT id FROM subscriptions LIMIT 1")
-            except sqlite3.OperationalError:
-                # Table doesn't exist or old schema, let's recreate safely
-                pass
-            
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER NOT NULL,
-                    role TEXT NOT NULL,
-                    location TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(chat_id, role, location)
-                )
-            """)
-            # Table for processed jobs to prevent duplicates
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS processed_jobs (
-                    job_hash TEXT PRIMARY KEY,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.commit()
+        if not self.db_url:
+            logger.warning("DATABASE_URL not set. Database features will fail.")
+            return
+
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Table for user subscriptions
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS subscriptions (
+                            id SERIAL PRIMARY KEY,
+                            chat_id BIGINT NOT NULL,
+                            role TEXT NOT NULL,
+                            location TEXT NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(chat_id, role, location)
+                        )
+                    """)
+                    # Table for processed jobs to prevent duplicates
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS processed_jobs (
+                            job_hash TEXT PRIMARY KEY,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Database init error: {e}")
 
     def add_subscription(self, chat_id, role, location):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    "INSERT INTO subscriptions (chat_id, role, location) VALUES (?, ?, ?)",
-                    (chat_id, role, location)
-                )
-                conn.commit()
-                return True
-            except sqlite3.IntegrityError:
-                return False # Already exists
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO subscriptions (chat_id, role, location) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                        (chat_id, role, location)
+                    )
+                    # Check if a row was actually inserted (psycopg2 returns rowcount)
+                    # But ON CONFLICT DO NOTHING returns rowcount 0 if conflict.
+                    # We need to know if it existed. 
+                    # Actually, for the user UX, if it exists, we return False.
+                    # rowcount is reliable here.
+                    conn.commit()
+                    return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Add sub error: {e}")
+            return False
 
     def remove_subscription(self, sub_id, chat_id):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM subscriptions WHERE id = ? AND chat_id = ?", (sub_id, chat_id))
-            conn.commit()
-            return cursor.rowcount > 0
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("DELETE FROM subscriptions WHERE id = %s AND chat_id = %s", (sub_id, chat_id))
+                    conn.commit()
+                    return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Remove sub error: {e}")
+            return False
 
     def get_user_subscriptions(self, chat_id):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, role, location FROM subscriptions WHERE chat_id = ?", (chat_id,))
-            return cursor.fetchall()
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT id, role, location FROM subscriptions WHERE chat_id = %s", (chat_id,))
+                    return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Get user subs error: {e}")
+            return []
 
     def get_all_subscriptions(self):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, chat_id, role, location FROM subscriptions")
-            return cursor.fetchall()
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT id, chat_id, role, location FROM subscriptions")
+                    return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Get all subs error: {e}")
+            return []
 
     def is_job_processed(self, job_hash):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM processed_jobs WHERE job_hash = ?", (job_hash,))
-            return cursor.fetchone() is not None
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT 1 FROM processed_jobs WHERE job_hash = %s", (job_hash,))
+                    return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"Check processed error: {e}")
+            return False
 
     def mark_job_processed(self, job_hash):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT OR IGNORE INTO processed_jobs (job_hash) VALUES (?)", (job_hash,))
-            conn.commit()
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("INSERT INTO processed_jobs (job_hash) VALUES (%s) ON CONFLICT DO NOTHING", (job_hash,))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Mark processed error: {e}")
 
-db = Database(DB_FILE)
+# Initialize with DATABASE_URL
+db = Database(DATABASE_URL)
 
 # ====================================================================
 # JOB SCRAPING LAYER
