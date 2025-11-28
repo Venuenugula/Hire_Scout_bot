@@ -439,6 +439,24 @@ def main():
             "Please try `/add` again."
         )
 
+    async def debug_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        import socket
+        import os
+        import time
+        
+        hostname = socket.gethostname()
+        pid = os.getpid()
+        uptime = time.time() - psutil.boot_time() # psutil needs install, let's use simple start time
+        
+        msg = (
+            f"🤖 **Bot Instance Info**\n"
+            f"🏠 Host: `{hostname}`\n"
+            f"🔢 PID: `{pid}`\n"
+            f"🕒 Server Time: `{datetime.now()}`"
+        )
+        await update.message.reply_text(msg, parse_mode='Markdown')
+
+    application.add_handler(CommandHandler("debug", debug_info))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, debug_catch_all))
 
     # Global Job Scheduler
