@@ -7,7 +7,3 @@ services:
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-    disk:
-      name: bot-data
-      mountPath: /app/data
-      sizeGB: 1
