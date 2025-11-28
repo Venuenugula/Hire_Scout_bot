@@ -241,7 +241,149 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("❌ Operation cancelled.")
     return ConversationHandler.END
 
-# ... (Management Commands remain the same) ...
+# --- Management Commands ---
+
+async def list_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    subs = db.get_user_subscriptions(chat_id)
+    
+    if not subs:
+        await update.message.reply_text("📭 You have no active subscriptions. Use `/add` to create one!", parse_mode='Markdown')
+        return
+
+    msg = "📋 **Your Active Alerts:**\n\n"
+    for sub_id, role, loc in subs:
+        msg += f"🆔 `{sub_id}`: **{role}** in **{loc}**\n"
+    
+    msg += "\nTo delete one, use `/delete <id>` (e.g., `/delete 1`)"
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def delete_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    try:
+        sub_id = int(context.args[0])
+        if db.remove_subscription(sub_id, chat_id):
+            await update.message.reply_text(f"✅ Subscription `{sub_id}` deleted.", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ Subscription not found or not yours.")
+    except (IndexError, ValueError):
+        await update.message.reply_text("⚠️ Usage: `/delete <id>`\nUse `/list` to find IDs.")
+
+# --- Dynamic Search ---
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Expected format: /search Role in Location
+    # Example: /search Python Developer in Remote
+    
+    args = " ".join(context.args)
+    if " in " not in args:
+        await update.message.reply_text(
+            "⚠️ Invalid format.\n"
+            "Usage: `/search <role> in <location>`\n"
+            "Example: `/search Python in Remote`",
+            parse_mode='Markdown'
+        )
+        return
+
+    role, location = args.split(" in ", 1)
+    await update.message.reply_text(f"🔍 Searching for **{role}** in **{location}**... Please wait.", parse_mode='Markdown')
+
+    # Run scraping in a separate thread to not block the bot
+    jobs = await asyncio.to_thread(scrape_and_filter, role, location, hours_old=72, limit=10)
+
+    if not jobs:
+        await update.message.reply_text("😔 No recent jobs found for this search.")
+        return
+
+    await send_job_batch(context, update.effective_chat.id, jobs, header=f"🔎 Search Results for **{role}**:")
+
+# --- Helper: Message Sending ---
+
+async def send_job_batch(context, chat_id, jobs, header=""):
+    if header:
+        await context.bot.send_message(chat_id=chat_id, text=header, parse_mode='Markdown')
+
+    # Send in chunks
+    chunk_size = 5
+    for i in range(0, len(jobs), chunk_size):
+        chunk = jobs[i:i + chunk_size]
+        message_text = ""
+        
+        for job in chunk:
+            title = job.get('title', 'N/A')
+            company = job.get('company_name', 'N/A')
+            loc = job.get('location', 'N/A')
+            url = job.get('job_url', 'N/A')
+            
+            message_text += (
+                f"💼 {title}\n"
+                f"🏢 {company}\n"
+                f"📍 {loc}\n"
+                f"🔗 {url}\n"
+                "-------------------\n"
+            )
+        
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=message_text,
+                disable_web_page_preview=True
+            )
+            await asyncio.sleep(1.0)
+        except Exception as e:
+            logger.error(f"Failed to send batch to {chat_id}: {e}")
+
+# ====================================================================
+# SCHEDULED TASK
+# ====================================================================
+
+async def check_jobs_task(context: ContextTypes.DEFAULT_TYPE):
+    """Iterates through all subscriptions and checks for new jobs."""
+    subscriptions = db.get_all_subscriptions()
+    
+    # Group by (role, location) to avoid scraping the same thing multiple times
+    # if multiple users want the same thing.
+    unique_searches = {}
+    for sub_id, chat_id, role, location in subscriptions:
+        key = (role.lower(), location.lower())
+        if key not in unique_searches:
+            unique_searches[key] = {'role': role, 'location': location, 'subscribers': []}
+        unique_searches[key]['subscribers'].append(chat_id)
+
+    for key, data in unique_searches.items():
+        role = data['role']
+        location = data['location']
+        subscribers = data['subscribers']
+        
+        # Scrape
+        all_jobs = await asyncio.to_thread(scrape_and_filter, role, location, hours_old=24)
+        
+        if not all_jobs:
+            continue
+
+        # For each subscriber, filter jobs they haven't seen
+        # Note: In this simple version, we deduplicate globally based on job hash.
+        # If User A and User B both sub to "Python", and we find Job X,
+        # we mark Job X as processed. If we mark it processed after sending to User A,
+        # User B might miss it if we are not careful.
+        # FIX: We should check if the job is processed *for this run*, but we only store global processed state.
+        # For simplicity in this "Master Level" update, we will just send new jobs to all subscribers
+        # and THEN mark them as processed.
+        
+        new_jobs_for_batch = []
+        for job in all_jobs:
+            job_hash = get_job_hash(job)
+            if not db.is_job_processed(job_hash):
+                new_jobs_for_batch.append(job)
+        
+        if new_jobs_for_batch:
+            # Notify all subscribers
+            for chat_id in subscribers:
+                await send_job_batch(context, chat_id, new_jobs_for_batch, header=f"🚨 New **{role}** jobs in **{location}**:")
+            
+            # Mark as processed after notifying everyone
+            for job in new_jobs_for_batch:
+                db.mark_job_processed(get_job_hash(job))
 
 # ====================================================================
 # HEALTH CHECK SERVER (FOR RENDER)
