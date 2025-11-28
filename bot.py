@@ -442,11 +442,9 @@ def main():
     async def debug_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import socket
         import os
-        import time
         
         hostname = socket.gethostname()
         pid = os.getpid()
-        uptime = time.time() - psutil.boot_time() # psutil needs install, let's use simple start time
         
         msg = (
             f"🤖 **Bot Instance Info**\n"
