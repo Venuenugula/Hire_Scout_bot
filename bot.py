@@ -223,22 +223,46 @@ async def check_jobs_task(context: ContextTypes.DEFAULT_TYPE):
             text=f"🚨 Found {len(new_jobs)} new job(s) for **{role}**!",
             parse_mode='Markdown'
         )
+        
+        # Helper to escape Markdown special characters
+        def escape_md(text):
+            special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+            for char in special_chars:
+                text = str(text).replace(char, f"\\{char}")
+            return text
+
         for job in new_jobs:
+            # Escape fields to prevent Markdown parsing errors
+            title = escape_md(job.get('title', 'N/A'))
+            company = escape_md(job.get('company_name', 'N/A'))
+            loc = escape_md(job.get('location', 'N/A'))
+            
             msg = (
-                f"💼 **{job['title']}**\n"
-                f"🏢 {job['company_name']}\n"
-                f"📍 {job['location']}\n"
+                f"💼 *{title}*\n"
+                f"🏢 {company}\n"
+                f"📍 {loc}\n"
                 f"🔗 [Apply Here]({job['job_url']})"
             )
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=msg,
-                    parse_mode='Markdown',
+                    parse_mode='MarkdownV2', # Use MarkdownV2 for better escaping support
                     disable_web_page_preview=True
                 )
+                # Sleep to avoid hitting Telegram rate limits (approx 30 msgs/sec max, but safer to go slow)
+                await asyncio.sleep(0.5) 
             except Exception as e:
                 logger.error(f"Failed to send message to {chat_id}: {e}")
+                # Fallback: Try sending without Markdown if it fails
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"💼 {job.get('title')}\n🏢 {job.get('company_name')}\n📍 {job.get('location')}\n🔗 {job['job_url']}",
+                        disable_web_page_preview=True
+                    )
+                except:
+                    pass
     else:
         logger.info(f"No new jobs for {chat_id}")
 
