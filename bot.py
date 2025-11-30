@@ -654,6 +654,16 @@ def main():
         print("🚨 ERROR: TELEGRAM_BOT_TOKEN environment variable is not set!")
         return
 
+    # List available Gemini models for debugging
+    if GEMINI_API_KEY:
+        try:
+            print("🔍 Checking available Gemini models...")
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    print(f"   - {m.name}")
+        except Exception as e:
+            print(f"⚠️ Error listing models: {e}")
+
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Conversation Handler for /add
