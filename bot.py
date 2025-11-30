@@ -535,14 +535,15 @@ async def send_job_batch(context, chat_id, jobs, header=""):
             loc = job.get('location', 'N/A')
             url = job.get('job_url', 'N/A')
             
-            message_text += (
-                f"💼 {title}\n"
-                f"🏢 {company}\n"
-                f"📍 {loc}\n"
+            message_text += f"💼 {title}\n"
+            message_text += f"🏢 {company}\n"
+            message_text += f"📍 {loc}\n"
+            message_text += f"🔗 {url}\n"
+            
             if 'match_score' in job:
                 message_text += f"⭐ **Match: {job['match_score']}%** - {job['match_reason']}\n"
                 
-            message_text += "-------------------\n")
+            message_text += "-------------------\n"
         
         try:
             await context.bot.send_message(
