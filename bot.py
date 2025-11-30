@@ -235,7 +235,7 @@ def analyze_job_relevance(job, user_query):
             f"Reply ONLY with 'YES' or 'NO'."
         )
 
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         
         answer = response.text.strip().upper()
