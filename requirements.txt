@@ -5,3 +5,4 @@ python-jobspy
 tls_client
 google-generativeai
 psycopg2-binary
+pypdf

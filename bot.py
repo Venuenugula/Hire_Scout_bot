@@ -17,6 +17,8 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
 )
+from pypdf import PdfReader
+import io
 
 # ====================================================================
 # CONFIGURATION
@@ -72,6 +74,14 @@ class Database:
                     cursor.execute("""
                         CREATE TABLE IF NOT EXISTS processed_jobs (
                             job_hash TEXT PRIMARY KEY,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    # Table for users (Resume Storage)
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS users (
+                            chat_id BIGINT PRIMARY KEY,
+                            resume_text TEXT,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                     """)
@@ -148,6 +158,36 @@ class Database:
         except Exception as e:
             logger.error(f"Mark processed error: {e}")
 
+    def add_user_resume(self, chat_id, resume_text):
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO users (chat_id, resume_text) 
+                        VALUES (%s, %s) 
+                        ON CONFLICT (chat_id) 
+                        DO UPDATE SET resume_text = EXCLUDED.resume_text
+                        """,
+                        (chat_id, resume_text)
+                    )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Add resume error: {e}")
+            return False
+
+    def get_user_resume(self, chat_id):
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT resume_text FROM users WHERE chat_id = %s", (chat_id,))
+                    result = cursor.fetchone()
+                    return result[0] if result else None
+        except Exception as e:
+            logger.error(f"Get resume error: {e}")
+            return None
+
 # Initialize with DATABASE_URL
 db = Database(DATABASE_URL)
 
@@ -184,6 +224,24 @@ def scrape_and_filter(role, location, hours_old=24, limit=10):
             # AI Filtering
             # We pass the job and the original role/location query to the AI
             user_query = f"{role} in {location}"
+            
+            # Fetch user resume if available (Assuming we have a way to know WHICH user this job is for)
+            # In the current architecture, scrape_and_filter is generic for a role/location.
+            # However, check_jobs_task iterates through subscribers.
+            # We need to pass the resume_text to analyze_job_relevance if we want personalization.
+            # BUT, scrape_and_filter is called ONCE per role/location for ALL users.
+            # This is a conflict: Personalization vs Efficiency.
+            # For "Master Level", we should prioritize Personalization.
+            # We will return ALL valid jobs here, and let the AI filter per-user in the loop?
+            # OR, we pass a list of resumes?
+            # Let's keep it simple: scrape_and_filter does generic relevance (Is this a Python job?).
+            # Then, in check_jobs_task, we do a second pass for "Resume Match".
+            
+            # Actually, the user asked for "Resume Matcher".
+            # Let's update analyze_job_relevance to accept an optional resume.
+            # If called from scrape_and_filter (generic), it uses just the query.
+            # We will add a NEW function `score_job_match(job, resume)` for the personalized check.
+            
             if analyze_job_relevance(row, user_query):
                 job_list.append(row)
             else:
@@ -239,13 +297,49 @@ def analyze_job_relevance(job, user_query):
         response = model.generate_content(prompt)
         
         answer = response.text.strip().upper()
-        logger.info(f"AI Decision for '{title}': {answer}")
+        # logger.info(f"AI Decision for '{title}': {answer}")
         
         return "YES" in answer
 
     except Exception as e:
         logger.error(f"AI Error: {e}")
         return True # Fail open on error to not miss jobs
+
+def score_job_match(job, resume_text):
+    """
+    Compares a job against a user's resume.
+    Returns a score (0-100) and a short reason.
+    """
+    if not GEMINI_API_KEY or not resume_text:
+        return 100, "No resume to match."
+
+    try:
+        title = job.get('title', 'N/A')
+        description = job.get('description', 'No description available')[:1000]
+        
+        prompt = (
+            f"You are a career coach. "
+            f"Job Title: '{title}'. "
+            f"Job Description: '{description}'. "
+            f"Candidate Resume: '{resume_text[:2000]}'. " # Truncate resume too
+            f"Rate the match between the candidate and this job on a scale of 0-100. "
+            f"Provide a 1-sentence reason. "
+            f"Format: SCORE | REASON"
+        )
+        
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        
+        if "|" in text:
+            score_str, reason = text.split("|", 1)
+            return int(score_str.strip()), reason.strip()
+        else:
+            return 50, "AI could not score."
+            
+    except Exception as e:
+        logger.error(f"AI Scoring Error: {e}")
+        return 100, "Error in scoring."
 
 # ====================================================================
 # TELEGRAM HANDLERS
@@ -355,6 +449,46 @@ async def delete_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         await update.message.reply_text("⚠️ Usage: `/delete <id>`\nUse `/list` to find IDs.")
 
+# --- Resume Upload Handler ---
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    document = update.message.document
+    
+    # Check if PDF
+    if document.mime_type != 'application/pdf':
+        await update.message.reply_text("⚠️ Please upload a **PDF** file.")
+        return
+
+    try:
+        file = await document.get_file()
+        file_bytes = await file.download_as_bytearray()
+        
+        # Extract text
+        pdf_reader = PdfReader(io.BytesIO(file_bytes))
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+            
+        if not text.strip():
+            await update.message.reply_text("⚠️ Could not read text from this PDF. Is it scanned?")
+            return
+            
+        # Save to DB
+        chat_id = update.effective_chat.id
+        if db.add_user_resume(chat_id, text):
+            await update.message.reply_text(
+                "📄 **Resume Saved!**\n\n"
+                "I will now use your resume to score job matches.\n"
+                "You'll see a 'Match Score' on new job alerts!",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text("⚠️ Error saving resume.")
+            
+    except Exception as e:
+        logger.error(f"Resume upload error: {e}")
+        await update.message.reply_text("⚠️ An error occurred processing your file.")
+
 # --- Dynamic Search ---
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -405,9 +539,10 @@ async def send_job_batch(context, chat_id, jobs, header=""):
                 f"💼 {title}\n"
                 f"🏢 {company}\n"
                 f"📍 {loc}\n"
-                f"🔗 {url}\n"
-                "-------------------\n"
-            )
+            if 'match_score' in job:
+                message_text += f"⭐ **Match: {job['match_score']}%** - {job['match_reason']}\n"
+                
+            message_text += "-------------------\n"
         
         try:
             await context.bot.send_message(
@@ -465,7 +600,23 @@ async def check_jobs_task(context: ContextTypes.DEFAULT_TYPE):
         if new_jobs_for_batch:
             # Notify all subscribers
             for chat_id in subscribers:
-                await send_job_batch(context, chat_id, new_jobs_for_batch, header=f"🚨 New **{role}** jobs in **{location}**:")
+                # Personalize with Resume Score
+                resume_text = db.get_user_resume(chat_id)
+                
+                personalized_jobs = []
+                for job in new_jobs_for_batch:
+                    if resume_text:
+                        score, reason = score_job_match(job, resume_text)
+                        # Filter out low scores? Let's keep them but show score.
+                        if score >= 50: # Only show good matches
+                            job['match_score'] = score
+                            job['match_reason'] = reason
+                            personalized_jobs.append(job)
+                    else:
+                        personalized_jobs.append(job)
+
+                if personalized_jobs:
+                    await send_job_batch(context, chat_id, personalized_jobs, header=f"🚨 New **{role}** jobs in **{location}**:")
             
             # Mark as processed after notifying everyone
             for job in new_jobs_for_batch:
@@ -515,6 +666,9 @@ def main():
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("list", list_subs))
     application.add_handler(CommandHandler("delete", delete_sub))
+    
+    # Resume Handler
+    application.add_handler(MessageHandler(filters.Document.PDF, handle_document))
 
     # Global Job Scheduler
     # We run one global job that checks ALL subscriptions
