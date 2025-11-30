@@ -295,7 +295,8 @@ def analyze_job_relevance(job, user_query):
             f"Reply ONLY with 'YES' or 'NO'."
         )
 
-        model_names = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-pro', 'gemini-1.0-pro']
+        # Updated list based on actual available models in logs
+        model_names = ['gemini-2.0-flash', 'gemini-flash-latest', 'gemini-pro-latest', 'gemini-1.5-flash']
         
         for model_name in model_names:
             try:
@@ -340,7 +341,8 @@ def score_job_match(job, resume_text):
             f"Format: SCORE | REASON"
         )
         
-        model_names = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-pro', 'gemini-1.0-pro']
+        # Updated list based on actual available models in logs
+        model_names = ['gemini-2.0-flash', 'gemini-flash-latest', 'gemini-pro-latest', 'gemini-1.5-flash']
         
         for model_name in model_names:
             try:
