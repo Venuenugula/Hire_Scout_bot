@@ -276,7 +276,9 @@ def analyze_job_relevance(job, user_query):
     try:
         title = job.get('title', 'N/A')
         company = job.get('company_name', 'N/A')
-        description = job.get('description', 'No description available')
+        description = str(job.get('description', ''))  # Ensure string
+        if not description or description.lower() == 'nan':
+            description = "No description available"
         
         # Truncate description to save tokens and avoid limits
         description = description[:1000] 
@@ -293,7 +295,7 @@ def analyze_job_relevance(job, user_query):
             f"Reply ONLY with 'YES' or 'NO'."
         )
 
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash-001')
         response = model.generate_content(prompt)
         
         answer = response.text.strip().upper()
@@ -315,7 +317,11 @@ def score_job_match(job, resume_text):
 
     try:
         title = job.get('title', 'N/A')
-        description = job.get('description', 'No description available')[:1000]
+        description = str(job.get('description', '')) # Ensure string
+        if not description or description.lower() == 'nan':
+            description = "No description available"
+            
+        description = description[:1000]
         
         prompt = (
             f"You are a career coach. "
@@ -327,7 +333,7 @@ def score_job_match(job, resume_text):
             f"Format: SCORE | REASON"
         )
         
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash-001')
         response = model.generate_content(prompt)
         text = response.text.strip()
         

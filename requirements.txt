@@ -3,6 +3,6 @@ APScheduler
 pandas
 python-jobspy
 tls_client
-google-generativeai
+google-generativeai>=0.5.0
 psycopg2-binary
 pypdf
