@@ -542,7 +542,7 @@ async def send_job_batch(context, chat_id, jobs, header=""):
             if 'match_score' in job:
                 message_text += f"⭐ **Match: {job['match_score']}%** - {job['match_reason']}\n"
                 
-            message_text += "-------------------\n"
+            message_text += "-------------------\n")
         
         try:
             await context.bot.send_message(
