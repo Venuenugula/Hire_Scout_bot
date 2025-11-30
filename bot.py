@@ -295,13 +295,20 @@ def analyze_job_relevance(job, user_query):
             f"Reply ONLY with 'YES' or 'NO'."
         )
 
-        model = genai.GenerativeModel('gemini-1.5-flash-001')
-        response = model.generate_content(prompt)
+        model_names = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-pro', 'gemini-1.0-pro']
         
-        answer = response.text.strip().upper()
-        # logger.info(f"AI Decision for '{title}': {answer}")
+        for model_name in model_names:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                answer = response.text.strip().upper()
+                return "YES" in answer
+            except Exception as e:
+                logger.warning(f"Model {model_name} failed: {e}")
+                continue
         
-        return "YES" in answer
+        logger.error("All AI models failed for relevance check.")
+        return True # Fail open
 
     except Exception as e:
         logger.error(f"AI Error: {e}")
@@ -333,15 +340,24 @@ def score_job_match(job, resume_text):
             f"Format: SCORE | REASON"
         )
         
-        model = genai.GenerativeModel('gemini-1.5-flash-001')
-        response = model.generate_content(prompt)
-        text = response.text.strip()
+        model_names = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-pro', 'gemini-1.0-pro']
         
-        if "|" in text:
-            score_str, reason = text.split("|", 1)
-            return int(score_str.strip()), reason.strip()
-        else:
-            return 50, "AI could not score."
+        for model_name in model_names:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                text = response.text.strip()
+                
+                if "|" in text:
+                    score_str, reason = text.split("|", 1)
+                    return int(score_str.strip()), reason.strip()
+                else:
+                    return 50, "AI could not score."
+            except Exception as e:
+                logger.warning(f"Model {model_name} failed scoring: {e}")
+                continue
+                
+        return 50, "All AI models failed."
             
     except Exception as e:
         logger.error(f"AI Scoring Error: {e}")
@@ -657,12 +673,12 @@ def main():
     # List available Gemini models for debugging
     if GEMINI_API_KEY:
         try:
-            print("🔍 Checking available Gemini models...")
+            logger.info("🔍 Checking available Gemini models...")
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
-                    print(f"   - {m.name}")
+                    logger.info(f"   - {m.name}")
         except Exception as e:
-            print(f"⚠️ Error listing models: {e}")
+            logger.error(f"⚠️ Error listing models: {e}")
 
     application = Application.builder().token(BOT_TOKEN).build()
 
