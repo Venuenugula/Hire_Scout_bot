@@ -667,6 +667,25 @@ def start_health_server():
     print(f"Health check server listening on port {port}")
     server.serve_forever()
 
+import time
+import httpx
+
+def keep_alive():
+    """Pings the bot's own URL every 10 minutes to prevent Render sleep."""
+    url = os.getenv("RENDER_EXTERNAL_URL")
+    if not url:
+        logger.warning("RENDER_EXTERNAL_URL not set. Keep-alive disabled.")
+        return
+
+    logger.info(f"Starting keep-alive for {url}")
+    while True:
+        time.sleep(600) # 10 minutes
+        try:
+            response = httpx.get(url)
+            logger.info(f"Keep-alive ping: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Keep-alive failed: {e}")
+
 # ====================================================================
 # MAIN
 # ====================================================================
@@ -723,4 +742,8 @@ def main():
 if __name__ == "__main__":
     # Start health check server in a separate thread
     threading.Thread(target=start_health_server, daemon=True).start()
+    
+    # Start keep-alive pinger in a separate thread
+    threading.Thread(target=keep_alive, daemon=True).start()
+    
     main()
