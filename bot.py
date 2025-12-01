@@ -384,6 +384,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         parse_mode='Markdown'
     )
 
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Simple health check command."""
+    await update.message.reply_text("Pong! 🏓 I am alive and running.")
+
 # --- Conversation for Adding Subscriptions ---
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -698,6 +702,7 @@ def main():
     application.add_handler(conv_handler)
     
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("ping", ping))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("list", list_subs))
     application.add_handler(CommandHandler("delete", delete_sub))
