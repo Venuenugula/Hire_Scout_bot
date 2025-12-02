@@ -216,36 +216,26 @@ def scrape_and_filter(role, location, hours_old=24, limit=10):
             return []
 
         # Convert to list of dicts
-        job_list = []
+        raw_jobs = []
         for _, row in jobs.iterrows():
             if pd.isna(row['title']) or pd.isna(row['job_url']):
                 continue
+            raw_jobs.append(row.to_dict())
+
+        # AI Filtering in Batches
+        user_query = f"{role} in {location}"
+        job_list = []
+        
+        chunk_size = 5
+        for i in range(0, len(raw_jobs), chunk_size):
+            chunk = raw_jobs[i:i + chunk_size]
+            relevant_indices = analyze_jobs_batch(chunk, user_query)
             
-            # AI Filtering
-            # We pass the job and the original role/location query to the AI
-            user_query = f"{role} in {location}"
-            
-            # Fetch user resume if available (Assuming we have a way to know WHICH user this job is for)
-            # In the current architecture, scrape_and_filter is generic for a role/location.
-            # However, check_jobs_task iterates through subscribers.
-            # We need to pass the resume_text to analyze_job_relevance if we want personalization.
-            # BUT, scrape_and_filter is called ONCE per role/location for ALL users.
-            # This is a conflict: Personalization vs Efficiency.
-            # For "Master Level", we should prioritize Personalization.
-            # We will return ALL valid jobs here, and let the AI filter per-user in the loop?
-            # OR, we pass a list of resumes?
-            # Let's keep it simple: scrape_and_filter does generic relevance (Is this a Python job?).
-            # Then, in check_jobs_task, we do a second pass for "Resume Match".
-            
-            # Actually, the user asked for "Resume Matcher".
-            # Let's update analyze_job_relevance to accept an optional resume.
-            # If called from scrape_and_filter (generic), it uses just the query.
-            # We will add a NEW function `score_job_match(job, resume)` for the personalized check.
-            
-            if analyze_job_relevance(row, user_query):
-                job_list.append(row)
-            else:
-                logger.info(f"Skipping irrelevant job: {row.get('title')}")
+            for j, job in enumerate(chunk):
+                if j in relevant_indices:
+                    job_list.append(job)
+                else:
+                    logger.info(f"Skipping irrelevant job: {job.get('title')}")
             
         return job_list
 
@@ -265,105 +255,110 @@ if GEMINI_API_KEY:
 else:
     logger.warning("⚠️ GEMINI_API_KEY not found. AI filtering will be disabled.")
 
-def analyze_job_relevance(job, user_query):
+import time
+import json
+
+def call_gemini_with_backoff(prompt, model_names, retries=3):
     """
-    Uses Gemini to check if a job matches the user's query.
-    Returns True (Relevant) or False (Not Relevant).
+    Calls Gemini with exponential backoff for rate limits.
+    Tries multiple models if one fails.
+    """
+    delay = 2
+    for attempt in range(retries):
+        for model_name in model_names:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                return response.text
+            except Exception as e:
+                if "429" in str(e) or "Resource has been exhausted" in str(e):
+                    logger.warning(f"Rate limit hit on {model_name}. Waiting {delay}s...")
+                    time.sleep(delay)
+                    delay *= 2 # Exponential backoff
+                    break # Break inner loop to retry with backoff
+                else:
+                    logger.warning(f"Model {model_name} failed: {e}")
+                    continue # Try next model immediately
+        
+    raise Exception("All models and retries failed.")
+
+def analyze_jobs_batch(jobs, user_query):
+    """
+    Analyzes a batch of jobs for relevance using Gemini.
+    Returns a set of indices of relevant jobs.
     """
     if not GEMINI_API_KEY:
-        return True # Fail open if no key
+        return set(range(len(jobs))) # Fail open
 
-    try:
+    # Prepare batch prompt
+    job_descriptions = ""
+    for i, job in enumerate(jobs):
         title = job.get('title', 'N/A')
         company = job.get('company_name', 'N/A')
-        description = str(job.get('description', ''))  # Ensure string
-        if not description or description.lower() == 'nan':
-            description = "No description available"
+        desc = str(job.get('description', ''))[:500] # Truncate heavily for batch
+        if not desc or desc.lower() == 'nan':
+            desc = "No description"
         
-        # Truncate description to save tokens and avoid limits
-        description = description[:1000] 
+        job_descriptions += f"JOB_ID {i}:\nTitle: {title}\nCompany: {company}\nSnippet: {desc}\n\n"
 
-        prompt = (
-            f"You are a strict technical recruiter. "
-            f"User is looking for: '{user_query}'. "
-            f"Job Title: '{title}'. "
-            f"Company: '{company}'. "
-            f"Job Description Snippet: '{description}'. "
-            f"Is this job a good match for the user's query? "
-            f"Ignore 'Senior' or 'Lead' roles if the user didn't ask for them. "
-            f"Ignore unrelated technologies. "
-            f"Reply ONLY with 'YES' or 'NO'."
-        )
+    prompt = (
+        f"You are a technical recruiter. User is looking for: '{user_query}'.\n"
+        f"Below are {len(jobs)} job summaries. Identify which ones are RELEVANT matches.\n"
+        f"Ignore 'Senior'/'Lead' if not asked. Ignore unrelated tech.\n\n"
+        f"{job_descriptions}\n"
+        f"Return ONLY a JSON list of integers representing the JOB_IDs of relevant jobs.\n"
+        f"Example: [0, 2, 5]\n"
+        f"If none are relevant, return []"
+    )
 
-        # Updated list based on actual available models in logs
-        model_names = ['gemini-2.0-flash', 'gemini-flash-latest', 'gemini-pro-latest', 'gemini-1.5-flash']
-        
-        for model_name in model_names:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                answer = response.text.strip().upper()
-                return "YES" in answer
-            except Exception as e:
-                logger.warning(f"Model {model_name} failed: {e}")
-                continue
-        
-        logger.error("All AI models failed for relevance check.")
-        return True # Fail open
-
-    except Exception as e:
-        logger.error(f"AI Error: {e}")
-        return True # Fail open on error to not miss jobs
-
-def score_job_match(job, resume_text):
-    """
-    Compares a job against a user's resume.
-    Returns a score (0-100) and a short reason.
-    """
-    if not GEMINI_API_KEY or not resume_text:
-        return 100, "No resume to match."
+    model_names = ['gemini-2.0-flash', 'gemini-flash-latest', 'gemini-pro-latest', 'gemini-1.5-flash']
 
     try:
-        title = job.get('title', 'N/A')
-        description = str(job.get('description', '')) # Ensure string
-        if not description or description.lower() == 'nan':
-            description = "No description available"
-            
-        description = description[:1000]
-        
-        prompt = (
-            f"You are a career coach. "
-            f"Job Title: '{title}'. "
-            f"Job Description: '{description}'. "
-            f"Candidate Resume: '{resume_text[:2000]}'. " # Truncate resume too
-            f"Rate the match between the candidate and this job on a scale of 0-100. "
-            f"Provide a 1-sentence reason. "
-            f"Format: SCORE | REASON"
-        )
-        
-        # Updated list based on actual available models in logs
-        model_names = ['gemini-2.0-flash', 'gemini-flash-latest', 'gemini-pro-latest', 'gemini-1.5-flash']
-        
-        for model_name in model_names:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                text = response.text.strip()
-                
-                if "|" in text:
-                    score_str, reason = text.split("|", 1)
-                    return int(score_str.strip()), reason.strip()
-                else:
-                    return 50, "AI could not score."
-            except Exception as e:
-                logger.warning(f"Model {model_name} failed scoring: {e}")
-                continue
-                
-        return 50, "All AI models failed."
-            
+        response_text = call_gemini_with_backoff(prompt, model_names)
+        # Clean response to ensure it's valid JSON
+        response_text = response_text.replace("```json", "").replace("```", "").strip()
+        relevant_indices = set(json.loads(response_text))
+        return relevant_indices
     except Exception as e:
-        logger.error(f"AI Scoring Error: {e}")
-        return 100, "Error in scoring."
+        logger.error(f"Batch analysis failed: {e}")
+        return set(range(len(jobs))) # Fail open
+
+def score_jobs_batch(jobs, resume_text):
+    """
+    Scores a batch of jobs against a resume.
+    Returns a dict: {job_index: {'score': int, 'reason': str}}
+    """
+    if not GEMINI_API_KEY or not resume_text:
+        return {}
+
+    # Prepare batch prompt
+    job_descriptions = ""
+    for i, job in enumerate(jobs):
+        title = job.get('title', 'N/A')
+        desc = str(job.get('description', ''))[:500]
+        if not desc or desc.lower() == 'nan':
+            desc = "No description"
+        job_descriptions += f"JOB_ID {i}:\nTitle: {title}\nSnippet: {desc}\n\n"
+
+    prompt = (
+        f"You are a career coach. Rate the match between the candidate and these jobs (0-100).\n"
+        f"Candidate Resume: '{resume_text[:2000]}'\n\n"
+        f"{job_descriptions}\n"
+        f"Return ONLY a JSON object where keys are JOB_IDs and values are objects with 'score' and 'reason'.\n"
+        f"Example: {{ \"0\": {{\"score\": 85, \"reason\": \"Good match\"}}, \"2\": {{\"score\": 40, \"reason\": \"Missing skills\"}} }}\n"
+    )
+
+    model_names = ['gemini-2.0-flash', 'gemini-flash-latest', 'gemini-pro-latest', 'gemini-1.5-flash']
+
+    try:
+        response_text = call_gemini_with_backoff(prompt, model_names)
+        response_text = response_text.replace("```json", "").replace("```", "").strip()
+        scores = json.loads(response_text)
+        # Convert keys to int
+        return {int(k): v for k, v in scores.items()}
+    except Exception as e:
+        logger.error(f"Batch scoring failed: {e}")
+        return {}
 
 # ====================================================================
 # TELEGRAM HANDLERS
@@ -633,16 +628,30 @@ async def check_jobs_task(context: ContextTypes.DEFAULT_TYPE):
                 resume_text = db.get_user_resume(chat_id)
                 
                 personalized_jobs = []
-                for job in new_jobs_for_batch:
-                    if resume_text:
-                        score, reason = score_job_match(job, resume_text)
-                        # Filter out low scores? Let's keep them but show score.
-                        if score >= 50: # Only show good matches
-                            job['match_score'] = score
-                            job['match_reason'] = reason
-                            personalized_jobs.append(job)
-                    else:
-                        personalized_jobs.append(job)
+                
+                if resume_text:
+                    # Batch Score
+                    chunk_size = 5
+                    for i in range(0, len(new_jobs_for_batch), chunk_size):
+                        chunk = new_jobs_for_batch[i:i + chunk_size]
+                        scores = score_jobs_batch(chunk, resume_text)
+                        
+                        for j, job in enumerate(chunk):
+                            if j in scores:
+                                score_data = scores[j]
+                                if score_data['score'] >= 50:
+                                    # Create a copy to not affect other subscribers
+                                    job_copy = job.copy()
+                                    job_copy['match_score'] = score_data['score']
+                                    job_copy['match_reason'] = score_data['reason']
+                                    personalized_jobs.append(job_copy)
+                            else:
+                                # AI failed or skipped, include without score?
+                                # Let's include it to be safe, or skip?
+                                # If AI fails, we probably want to show it anyway.
+                                personalized_jobs.append(job)
+                else:
+                    personalized_jobs = new_jobs_for_batch
 
                 if personalized_jobs:
                     await send_job_batch(context, chat_id, personalized_jobs, header=f"🚨 New **{role}** jobs in **{location}**:")
