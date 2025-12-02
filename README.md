@@ -88,4 +88,4 @@ This project is configured for **Render**.
 This project is open-source and available under the MIT License.
 
 ---
-*Built with ❤️ by [Your Name]*
+*Built with ❤️ by Venu Enugula*
